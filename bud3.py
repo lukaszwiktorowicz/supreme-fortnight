@@ -1,0 +1,358 @@
+# -*- coding: cp1250 -*-
+#
+# skrypt generalizacji kartograficznej budynków z wykorzystaniem przek¹tnych obiektu
+#
+#### UWAGI ####
+#
+# skrypt nie dzia³a dla multipoligonów oraz niektórych poligonów z enklawami, wypisuje id pominiêtych budynków dla których wsyt¹pi³ b³¹d
+# parametry programu do podania:
+#    tolerancja - tolerancja k¹towa wykorzystywana przy czyszczeniu poligonu z punktow
+#             k - ilosc odcinanych wierzcholkow w iteracji
+#            k2 - docelowa ilosc wierzcholkow w wyniku
+# id_field_name - nazwa pola z tabeli atrybutów z unikalnym ID 
+
+import arcpy
+from math import sqrt, atan, acos, cos, sin, pi
+
+arcpy.env.overwriteOutput = True
+
+
+
+#### FUNKCJE #####
+
+
+            
+### liczenie azymutu
+def az(p,q):
+    try:
+        dy = q[1]-p[1]
+        dx = q[0]-p[0]
+        if dx == 0:
+            czwartak = 0
+            if dy>0:
+                azymut=100
+            if dy<0:
+                azymut=300                
+        else:
+            czwartak=atan(float(abs(dy))/float(abs(dx)))
+            czwartak=czwartak*200/math.pi
+            if dx>0:
+                if dy>0:
+                    azymut = czwartak
+                if dy<0:
+                    azymut = 400 - czwartak
+                if dy==0:
+                    azymut = 0
+            if dx<0:
+                if dy>0:
+                    azymut = 200 - czwartak
+                if dy<0:
+                    azymut = 200 + czwartak
+                if dy==0:
+                    azymut = 200
+        return azymut
+    except Exception, err:
+        arcpy.AddError("blad azymut")
+        arcpy.AddError(sys.exc_traceback.tb_lineno)
+        arcpy.AddError(err.message)
+    finally:
+        del(dx,dy,czwartak)
+        
+
+
+### funkcja czytaj¹ca geometriê
+def czytaj2(geometria):
+    try:
+        lista = []
+        i = 0
+        for part in geometria:
+            for pnt in part:
+                if pnt:
+                    lista.append([pnt.X, pnt.Y])
+        i += 1
+        return lista
+    finally:
+        del(i, part, pnt, geometria, lista)
+
+
+
+### funkcja licz¹ca k¹t miêdzy azymutami
+def angle(az1,az2):
+    angle = az2 - az1
+    return(angle)
+
+
+
+### funkcja czyszcz¹ca budynek z punktów z zadan¹ tolerancj¹ k¹tów (zmienna 'tolerancja' globalna)
+### input - lista w postaci [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ]
+### output - wyczyszczona lista w takiej samej postaci
+def clear_list(lista1):
+    do_wywalenia = []
+    for i1 in range(len(lista1)):
+        
+        poprzedni = i1-1
+        nastepny = i1+1
+        
+        if poprzedni == -1:
+            poprzedni = len(lista1)-2
+
+        if nastepny > len(lista1)-1:
+            nastepny = 1
+            
+        angle1=abs(angle(az(lista1[i1],lista1[poprzedni]),az(lista1[i1],lista1[nastepny])))
+        
+        if (angle1>(200-tolerancja) and angle1<(200+tolerancja)):
+            do_wywalenia.append(i1)
+
+    if len(do_wywalenia) == 0:
+        return(lista1)
+    else:   
+        do_wywalenia.reverse()
+           
+        for index in do_wywalenia:
+            lista1.pop(index)
+
+        if do_wywalenia[-1] == 0: lista1.append(lista1[0])
+
+        return(lista1)
+
+
+
+### funkcja licz¹ca odleg³oœæ miêdzy punktami
+### input - lista w postaci [ [X1,Y1] , [X2,Y2] ]
+### output - odleg³oœæ
+def length(a,b):
+    length = sqrt((a[1]-b[1])**2+(a[0]-b[0])**2)
+    return(length)
+
+
+
+### funkcja licz¹ca iloœæ obiektów na liœcie miêdzy zadanymi indeksami
+### input - d³ugoœæ listy , index startowy , index koñcowy
+### output - liczba
+def compute_range(length_of_list,x1,x2):
+    if x2 - x1 < 0:
+        output_range = length_of_list - x1 - 1 + x2
+    else:
+        output_range = x2 - x1 - 1
+    return(output_range)
+
+
+
+### funkcja do budowania listy przekatnych
+### input - lista w postaci [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ]
+### output - lista przek¹tnych w postaci [ [ d³ugoœæ przek¹tnej , index punktu startowego , index punktu koñcowego ] , ... ]
+def create_lista_przek(lista1):
+    poligon = create_arcpy_polygon(lista1)
+    length1 = len(lista1)-1
+    lista_przekatnych = []
+    for i1 in range(len(lista1)-1):
+        for i2 in range(i1+2,len(lista1)-1):
+            
+            ### sprawdzanie warunku o ilosci odcinanych punktów
+            ### musi odcinaæ DOK£ADNIE k (zdefiniowane w programie) punktów i przy tym musi zostaæ co namniej k2 (zdefiniowane w programie, u nas równe 4) punkty po potenjalnym odciêciu
+            ### je¿eli ¿adna przek¹tna nie spe³nia warunku to lista przek¹tnych jest pusta
+            
+            if (((compute_range(length1,i1,i2) == k) and ((length1 - compute_range(length1,i1,i2)) >= k2)) or ((compute_range(length1,i2,i1) == k) and ((length1 - compute_range(length1,i2,i1)) >= k2))):
+
+                ### sprawdzenie czy przekatna nie przecina poligonu
+                
+                if not create_arcpy_line([lista1[i1],lista1[i2]]).crosses(poligon):
+                    lista_przekatnych.append([length(lista1[i1],lista1[i2]),i1,i2])                
+        #if i1 == 0: lista_przekatnych.pop(len(lista_przekatnych)-1)
+    return(lista_przekatnych)
+
+
+
+### funkcja do wyszukiwania najkrótszej wœród przek¹tnych
+### input - lista przek¹tnych w postaci [ [ d³ugoœæ przek¹tnej , index punktu startowego , index punktu koñcowego ] , ... ]
+### output - przek¹tna w postaci [ d³ugoœæ przek¹tnej , index punktu startowego , index punktu koñcowego ]
+def search_min_przekatna(lista):
+    minimum = lista
+    for przekatna in lista:
+        if przekatna[0] < minimum[0]:
+            minimum = przekatna
+            
+    return(minimum)
+
+
+
+### funkcja do szukania najmniejszej przekatnej i tworzenia obiektow: glownego i odciêtego
+### KORZYSTA Z: search_min_przekatna() , create_lista_przek()
+### input - lista wspó³rzêdnych budynku w postaci [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ]
+### output - listy obiektu g³ównego i odciêtego w postaci [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ] oraz najkrószej przek¹tnej
+def delete_points(lista):
+    najkrotsza = search_min_przekatna(create_lista_przek(lista))
+    object1 = range(najkrotsza[1],najkrotsza[2]+1)+[najkrotsza[1]]
+    object1_1 = [lista[index] for index in object1]
+    object2 = range(najkrotsza[2],len(lista)-1)+range(0,najkrotsza[1]+1)+[najkrotsza[2]]
+    object2_2 = [lista[index] for index in object2]
+
+    ### warunek o wybraniu obiektu do odciecia: odcinana jest czêœæ która ma mniejsz¹ powierzchniê
+    if create_arcpy_polygon(object2_2).area > create_arcpy_polygon(object1_1).area:
+        odciete = object1_1
+        glowny = object2_2
+    else:
+        odciete = object2_2
+        glowny = object1_1
+    return([glowny,odciete,najkrotsza])
+        
+
+
+### g³ówna funkcja generalizuj¹ca
+### na zmianê czyszczenie z punktów na liniach (z tolerancj¹) i usuwanie przek¹tnymi
+### input - budynek w postaci [ [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ], ID ]
+### output - zgeneralizowany budynek w postaci  [ [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ], ID ] , lista odciêtych obiektów w postaci [ [ [ [X1,Y1] , [X2,Y2], ... , [X1,Y1] ] , ID_odcietego ], ID_budynku ]
+def generalizacja(budynek):
+    
+    ID = budynek[1]
+    budynek = budynek[0]
+    w = len(budynek)-1
+
+    # wyzerowanie (w zasadzie to wyjedynkowanie) licznika odciêtych fragmentów
+    nr_odcietego = 1
+
+    # wyzerowanie listy odciêtyc fragmentów 
+    lista_odcietych = []
+    
+    # sprawdzenie czy lista przyk¹tnych nie jest pusta
+    if not len(create_lista_przek(budynek)) == 0:
+        
+        # pêtla dopóki liczba wierzcho³ków w jest wiêksza od liczby wierzcho³ków wynikowego obiektu (4)
+        while w > k2:
+            
+            # czyszczenie budynku z punktów na odcinkach przy zadanej tolerancji
+            budynek = clear_list(budynek)
+
+            temp_budynek = budynek
+            
+            w = len(budynek)-1
+
+            # ponowne (po wyczyszczeniu z niepotrzebnych punktów) sprawdzenie czy lista przek¹tnych nie jest pusta. Je¿eli jest pusta to break (przerwanie) pêtli while dla budynku (brak mo¿liwoœci dalszej generalizacji)
+            if not len(create_lista_przek(budynek)) == 0:
+
+                #sprawdzenie warunku 
+                if w > k2:
+                    
+                        # wywo³anie funkcji generalizuj¹cej
+                        # budynek - zgeneralizowny budynek
+                        # odciêty - kolejny odciêty fragment
+                        # przekatna - przek¹tna po której odciêto fragment
+                        budynek,odciety,przekatna = delete_points(budynek)[0],delete_points(budynek)[1],delete_points(budynek)[2]
+                        
+                        # sprawdzanie czy odcinany obiekt jest wewnatrz czy na zewnatrz poligonu
+                        if create_arcpy_line([temp_budynek[przekatna[1]],temp_budynek[przekatna[2]]]).within(create_arcpy_polygon(temp_budynek)):    
+                            odciety = [odciety,nr_odcietego,1]
+                        else:
+                            odciety = [odciety,nr_odcietego,0]
+
+                        # dodanie odciêtego fragmentu do listy odciêtych fragmentów
+                        lista_odcietych.append(odciety)
+                        
+                        #dodanie 1 do licznika odciêtych fragmentów
+                        nr_odcietego = nr_odcietego + 1
+            else:
+                break
+            w = len(budynek)-1
+
+    budynek = [budynek,ID]
+    lista_odcietych = [lista_odcietych,ID]
+    return(budynek,lista_odcietych)
+
+
+
+#tworzenie obiektu arcpy.Polyline
+def create_arcpy_line(line):
+    arcpy_line = arcpy.Polyline(arcpy.Array([arcpy.Point(line[0][0],line[0][1]),arcpy.Point(line[1][0],line[1][1])]))
+    return(arcpy_line)
+
+
+
+#tworzenie obiektu arcpy.Polygon
+def create_arcpy_polygon(polygon):
+    arcpy_polygon = arcpy.Polygon(arcpy.Array([arcpy.Point(ppoint[0],ppoint[1]) for ppoint in polygon]))
+    return(arcpy_polygon) 
+
+
+
+    
+
+######################## PARAMETRY PROGRAMU ########################
+
+
+
+#w gradach
+tolerancja = 10
+#ilosc usunietych wierzcholkow
+k=1
+#ilosc punktow w wyniku:
+k2=4
+#nazwa pola z ID w wejsciowym pliku
+id_field_name = 'OBJECTID'
+
+
+
+
+######################## ŒCIE¯KA DO SHP ########################
+
+budynki = r'C:\Users\kielbasi\Desktop\studia\SEMESTR9\PPGII\egzamin\Dane.shp'
+output_path = r'C:\Users\kielbasi\Desktop\studia\SEMESTR9\PPGII\egzamin'
+
+######################## ŒCIE¯KA DO SHP ########################
+
+### czytanie geometrii
+print('Czytam geometriê ...')
+print(' ')
+kursor_czytania = arcpy.da.SearchCursor(budynki, ['SHAPE@', id_field_name])
+lista_budynkow = []
+lista_odrzuconych = []
+for row_czy in kursor_czytania:
+    try:
+        geometria = czytaj2(row_czy[0])
+        lista2 = [geometria,row_czy[1]]
+        lista_budynkow.append(lista2)
+    except:
+        lista_odrzuconych.append(row_czy[1])
+
+
+
+### generalizacja
+
+print('Generalizujê ...')
+print(' ')
+wynik_lista = []
+wynik_lista_odcietych = []
+for poligon in lista_budynkow:
+    print('Dzialam dla budynku nr ' + str(poligon[1]))
+    try:
+        wynik_lista.append(generalizacja(poligon)[0])
+        wynik_lista_odcietych.append(generalizacja(poligon)[1])
+    except:
+        lista_odrzuconych.append(poligon[1])
+
+### tworzenie warstw wynikowych
+print(' ')
+print('Zapisujê pliki ...')
+print(' ')
+wynik_shp = arcpy.CreateFeatureclass_management(output_path,'wynik.shp','POLYGON',budynki)
+wynik_shp_odciete = arcpy.CreateFeatureclass_management(output_path,'wynik_odciete.shp','POLYGON')
+arcpy.AddField_management(wynik_shp_odciete,'id_budynku','SHORT')
+arcpy.AddField_management(wynik_shp_odciete,'id_odciete','SHORT')
+arcpy.AddField_management(wynik_shp_odciete,'In_Out','SHORT')
+
+
+### pisanie geometrii i uzupe³nianie tabeli atrybutów
+with arcpy.da.InsertCursor(wynik_shp, ['SHAPE@', id_field_name]) as cursor:
+    for poligon in wynik_lista:
+        cursor.insertRow([poligon[0],poligon[1]])
+
+with arcpy.da.InsertCursor(wynik_shp_odciete, ['SHAPE@', 'id_budynku', 'id_odciete','In_Out']) as cursor:
+    for budynek in wynik_lista_odcietych:
+        for odciety in budynek[0]:
+            id_budynku = budynek[1]
+            cursor.insertRow([odciety[0],id_budynku,odciety[1],odciety[2]])
+
+
+### wypisanie id budynkow dla ktorych nie przeprowadzono generalizacji (wystapil b³¹d)
+print('Lista id budynków odrzuconych na wskutek wyst¹pienia b³êdów: ' + str(lista_odrzuconych))
+
